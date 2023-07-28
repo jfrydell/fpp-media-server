@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Listen</title>
+  <script>
+    var playing = "";
+    var audio;
+    var start_time = 0;
+    window.addEventListener("DOMContentLoaded", function() {
+      audio = document.getElementById("audio");
+      audioSource = document.getElementById("audioSource");
+      setInterval(correct_drift, 100);
+    });
+    const ws = new WebSocket(`ws://${window.location.host}/ws`);
+    ws.onopen = function() {
+      // Benchmark latency
+      let start = performance.now();
+      ws.send();
+    };
+    ws.onmessage = (event) => {
+      document.getElementById('log').innerHTML = event.data + "<br>" + document.getElementById('log').innerHTML;
+      try {
+        handle_event(JSON.parse(event.data));
+      } catch (e) {
+        console.log(e);
+      }
+    };
+    function handle_event(event) {
+      start_time = performance.now() / 1000 - event.time;
+      console.log("start time: " + start_time);
+      if (event.filename != playing) {
+        playing = event.filename;
+        document.getElementById('current_song').innerHTML = event.filename;
+        audioSource.src = `${event.filename}`;
+        audio.load();
+        audio.play();
+        console.log("loaded");
+      }
+    }
+    function correct_drift() {
+      // Drift correction unnecessary if not playing
+      if (audio.paused) {
+        return;
+      }
+      // drift = how far behind audio is
+      let drift = performance.now() / 1000 - start_time - audio.currentTime;
+      if (Math.abs(drift) > 0.5) {
+        console.log("MAJOR DRIFT");
+        audio.currentTime = performance.now() / 1000 - start_time;
+      } else {
+        // Calculate needed speed change for next 0.5 seconds to correct drift (positive drift means next 0.5 seconds should go faster)
+        let speed_change = 1 + drift / 0.5;
+        audio.playbackRate = speed_change;
+        console.log("minor drift: " + speed_change);
+      }
+    }
+  </script>
+</head>
+
+<body>
+  <h1>Welcome to Test</h1>
+  <p>Currently Playing: "<span id="current_song"></span>"</p>
+  <audio id="audio" controls>
+    <source id="audioSource" src="" />
+  </audio>
+  <h2>Event Log</h2>
+  <p id="log"></p>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[package]
+name = "fpp-media"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version = "0.6.19", features = ["ws"] }
+serde = { version = "1.0.176", features = ["derive"] }
+serde_json = "1.0.104"
+serde_urlencoded = "0.7.1"
+tokio = { version = "1.29.1", features = ["macros", "rt", "full"] }
+tower-http = { version = "0.4.3", features = ["fs"] }

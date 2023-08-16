@@ -21,10 +21,10 @@
     }
     async function benchmark_latency(ws) {
       return await new Promise((resolve, reject) => {
-        let start = performance.now() / 1000;
+        let start = audio_ctx.currentTime;
         ws.send(0);
         ws.onmessage = (event) => {
-          let end = performance.now() / 1000;
+          let end = audio_ctx.currentTime;
           let middle = parseFloat(event.data);
           let offset = (middle - (start + end) / 2);
           console.log("client times: " + start + ", " + end);
@@ -35,9 +35,10 @@
         };
       });
     }
-    setInterval(sync_clock, 10000);
 
-    // Audio status update
+    // Audio context
+    var audio_ctx = null;
+    var audio_source = null;
     var audio_start = 0; // client time when audio started playing
     var filename = null; // filename of the current song
     var id = -1; // id of the current status
@@ -53,70 +54,63 @@
       if (!status.filename) {
         filename = null;
         document.getElementById('current-song').innerHTML = "N/A";
-        document.getElementById('audio-source').src = "";
-        document.getElementById('audio').pause();
-        audio_start = performance.now() / 1000;
+        audio_start = audio_ctx.currentTime;
+        if (audio_source) {
+          audio_source.stop();
+        }
         log("stopped audio");
       } else {
         filename = status.filename;
         document.getElementById('current-song').innerHTML = filename;
-        document.getElementById('audio-source').src = filename;
         audio_start = status.start_time - server_offset;
-        document.getElementById('audio').load();
-        document.getElementById('audio').play();
+        await load_audio(filename);
         log("loaded " + filename);
       }
       id = status.id;
     }
-    setInterval(update_audio_status, 2000);
+    async function load_audio(filename) {
+      if (audio_source) {
+        audio_source.stop();
+      }
+      const response = await fetch(filename);
+      let buffer = await response.arrayBuffer();
+      await audio_ctx.decodeAudioData(buffer, (audio_buffer) => {
+        audio_source = audio_ctx.createBufferSource();
+        audio_source.buffer = audio_buffer;
+        audio_source.connect(audio_ctx.destination);
 
-    // Audio sync and drift correction
-    var start_delays = [0.0];
-    async function sync_audio() {
-      if (!filename) {
-        return;
-      }
-      let correct_time = performance.now() / 1000 - audio_start;
-      let drift = audio.currentTime - correct_time;
-      console.log("drift: " + drift);
-      if (Math.abs(drift) > 0.1) {
-        console.log("Major Drift: " + drift);
-        await set_audio_time(correct_time);
-      }
-    }
-    // Sets the audio's time, then waits for the audio to actually update and measures the delay so it can correct for it
-    async function set_audio_time(correct_time) {
-      let audio = document.getElementById('audio');
-      audio.currentTime = correct_time + start_delays.reduce((a, b) => a + b) / start_delays.length;
-      let start = performance.now() / 1000;
-      await new Promise((resolve, reject) => {
-        audio.onseeked = resolve;
-        audio.onerror = reject;
+        // Start audio at the correct time
+        let initial_time = audio_ctx.currentTime + 0.5 - audio_start;
+        audio_source.start(audio_ctx.currentTime + 0.5, initial_time);
       });
-      let end = performance.now() / 1000;
-      let delay = end - start;
-      start_delays.push(delay);
-      if (start_delays.length > 10) {
-        start_delays.shift();
-      }
-      log("start delay: " + delay);
     }
-    setInterval(sync_audio, 100);
 
+    async function start_everything() {
+      log("starting...");
+      audio_ctx = new AudioContext();
+      await sync_clock();
+      await update_audio_status();
+      setInterval(sync_clock, 10000);
+      setInterval(update_audio_status, 2000);
+      log("started");
+    }
+    
     // Event log
     function log(message) {
       document.getElementById('log').innerHTML = message + "<br>" + document.getElementById('log').innerHTML;
       console.log(message);
     }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("start-btn").onclick = start_everything;
+    });
   </script>
 </head>
 
 <body>
   <h1>Welcome to Test</h1>
   <p>Currently Playing: "<span id="current-song"></span>"</p>
-  <audio id="audio" controls>
-    <source id="audio-source" src="" />
-  </audio>
+  <button id="start-btn">Start</button>
   <h2>Event Log</h2>
   <p id="log"></p>
 </body>

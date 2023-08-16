@@ -14,20 +14,18 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 
-type AppState = (Arc<RwLock<CurrentState>>, broadcast::Sender<()>);
+type AppState = Arc<RwLock<CurrentState>>;
 
 #[tokio::main]
 async fn main() {
-    let (update_sender, _) = broadcast::channel(1);
     let state = Arc::new(RwLock::new(CurrentState::default()));
     let router = Router::new()
         .route("/", post(handle_sync_event))
-        .route("/api/start_time", get(get_start_time))
+        .route("/api/status", get(get_status))
         .route("/ws", get(upgrade_ws))
-        .with_state((state, update_sender))
+        .with_state(state)
         .fallback_service(ServeDir::new("./content"));
     axum::Server::bind(&"0.0.0.0:9000".parse().unwrap())
         .serve(router.into_make_service())
@@ -35,10 +33,11 @@ async fn main() {
         .unwrap();
 }
 
-async fn get_start_time(State(state): State<AppState>) -> Result<impl IntoResponse, ()> {
-    let state = state.0.read().unwrap();
+async fn get_status(State(state): State<AppState>) -> Result<impl IntoResponse, ()> {
+    let state = state.read().unwrap();
     #[derive(Serialize)]
     struct Response {
+        id: i32,
         filename: Option<String>,
         start_time: f64,
     }
@@ -48,20 +47,17 @@ async fn get_start_time(State(state): State<AppState>) -> Result<impl IntoRespon
         .copied()
         .reduce(|a, b| a + b)
         .map(|s| s / state.start_times.len() as f64)
-        .unwrap_or(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64(),
-        );
+        .unwrap_or(current_time());
     Ok(Json(Response {
+        id: state.id,
         filename: state.filename.clone(),
         start_time: avg_start,
     }))
 }
 
 async fn handle_sync_event(State(app_state): State<AppState>, Json(event): Json<Event>) {
-    let mut state = app_state.0.write().unwrap();
+    println!("Received event: {}", event);
+    let mut state = app_state.write().unwrap();
     match event {
         Event::MediaStart { id, filename } => {
             if id >= state.id || state.id - id > 100 {
@@ -81,14 +77,11 @@ async fn handle_sync_event(State(app_state): State<AppState>, Json(event): Json<
             time,
             latencies,
         } => {
-            if id >= state.id {
+            if id == state.id {
                 let avg_latency = latencies.iter().sum::<f64>() / latencies.len() as f64;
                 state.time = time + avg_latency;
                 // Calculate start time of sequence
-                let current_time = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap();
-                let start_time = current_time.as_secs_f64() - state.time;
+                let start_time = current_time() - state.time;
                 // Add to queue
                 state.start_times.push_back(start_time);
                 if state.start_times.len() > 20 {
@@ -96,26 +89,34 @@ async fn handle_sync_event(State(app_state): State<AppState>, Json(event): Json<
                 }
             } else {
                 println!("Sync event with wrong id: {} (should be {})", id, state.id);
+                state.filename = None;
+                state.start_times.clear();
             }
         }
     }
-    drop(state);
-    println!("Sending update: {:?}", *app_state.0.read().unwrap());
-    let _ = app_state.1.send(()); // Ignore error if no one is listening
 }
 
-async fn upgrade_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(|ws| handle_ws(ws, state))
+async fn upgrade_ws(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|ws| handle_ws(ws))
 }
-async fn handle_ws(mut ws: WebSocket, state: AppState) {
-    let mut rx = state.1.subscribe();
-    while let Ok(()) = rx.recv().await {
-        let msg = {
-            let state = state.0.read().unwrap();
-            Message::Text(serde_json::to_string(&*state).unwrap())
-        };
-        ws.send(msg).await.unwrap();
+async fn handle_ws(mut ws: WebSocket) {
+    while let Some(Ok(msg)) = ws.recv().await {
+        if matches!(msg, Message::Close(_)) {
+            break;
+        }
+        // Send current time
+        ws.send(Message::Text(current_time().to_string()))
+            .await
+            .unwrap();
     }
+}
+
+/// Get current time in seconds since UNIX epoch
+fn current_time() -> f64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
@@ -133,6 +134,25 @@ enum Event {
     MediaStop {
         id: i32,
     },
+}
+impl std::fmt::Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Event::Sync {
+                id,
+                time,
+                latencies,
+            } => write!(
+                f,
+                "Sync(id={}, time={}, latencies={:?})",
+                id, time, latencies
+            ),
+            Event::MediaStart { id, filename } => {
+                write!(f, "MediaStart(id={}, filename={})", id, filename)
+            }
+            Event::MediaStop { id } => write!(f, "MediaStop(id={})", id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

@@ -5,65 +5,117 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Listen</title>
   <script>
-    var playing = "";
-    var audio;
-    var start_time = 0;
-    window.addEventListener("DOMContentLoaded", function() {
-      audio = document.getElementById("audio");
-      audioSource = document.getElementById("audioSource");
-      setInterval(correct_drift, 100);
-    });
-    const ws = new WebSocket(`ws://${window.location.host}/ws`);
-    ws.onopen = function() {
-      // Benchmark latency
-      let start = performance.now();
-      ws.send();
-    };
-    ws.onmessage = (event) => {
-      document.getElementById('log').innerHTML = event.data + "<br>" + document.getElementById('log').innerHTML;
-      try {
-        handle_event(JSON.parse(event.data));
-      } catch (e) {
-        console.log(e);
+    // Clock sync
+    var server_offset = 0; // (server time - client time) in seconds
+    async function sync_clock() {
+      let ws = new WebSocket(`ws://${window.location.host}/ws`);
+      await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = reject;
+      });
+      let server_offsets = [];
+      for (let i = 0; i < 10; i++) {
+        server_offsets.push(await benchmark_latency(ws));
       }
-    };
-    function handle_event(event) {
-      start_time = performance.now() / 1000 - event.time;
-      console.log("start time: " + start_time);
-      if (event.filename != playing) {
-        playing = event.filename;
-        document.getElementById('current_song').innerHTML = event.filename;
-        audioSource.src = `${event.filename}`;
-        audio.load();
-        audio.play();
-        console.log("loaded");
-      }
+      server_offset = server_offsets.reduce((a, b) => a + b) / server_offsets.length;
     }
-    function correct_drift() {
-      // Drift correction unnecessary if not playing
-      if (audio.paused) {
+    async function benchmark_latency(ws) {
+      return await new Promise((resolve, reject) => {
+        let start = performance.now() / 1000;
+        ws.send(0);
+        ws.onmessage = (event) => {
+          let end = performance.now() / 1000;
+          let middle = parseFloat(event.data);
+          let offset = (middle - (start + end) / 2);
+          console.log("client times: " + start + ", " + end);
+          console.log("server time: " + middle);
+          console.log("latency: " + (end - start));
+          console.log("offset: " + offset);
+          resolve(offset);
+        };
+      });
+    }
+    setInterval(sync_clock, 10000);
+
+    // Audio status update
+    var audio_start = 0; // client time when audio started playing
+    var filename = null; // filename of the current song
+    var id = -1; // id of the current status
+    async function update_audio_status() {
+      if (!server_offset) {
+        await sync_clock();
+      }
+      let status = await fetch("/api/status")
+        .then(response => response.json())
+      if (status.id == id) {
         return;
       }
-      // drift = how far behind audio is
-      let drift = performance.now() / 1000 - start_time - audio.currentTime;
-      if (Math.abs(drift) > 0.5) {
-        console.log("MAJOR DRIFT");
-        audio.currentTime = performance.now() / 1000 - start_time;
+      if (!status.filename) {
+        filename = null;
+        document.getElementById('current-song').innerHTML = "N/A";
+        document.getElementById('audio-source').src = "";
+        document.getElementById('audio').pause();
+        audio_start = performance.now() / 1000;
+        log("stopped audio");
       } else {
-        // Calculate needed speed change for next 0.5 seconds to correct drift (positive drift means next 0.5 seconds should go faster)
-        let speed_change = 1 + drift / 0.5;
-        audio.playbackRate = speed_change;
-        console.log("minor drift: " + speed_change);
+        filename = status.filename;
+        document.getElementById('current-song').innerHTML = filename;
+        document.getElementById('audio-source').src = filename;
+        audio_start = status.start_time - server_offset;
+        document.getElementById('audio').load();
+        document.getElementById('audio').play();
+        log("loaded " + filename);
       }
+      id = status.id;
+    }
+    setInterval(update_audio_status, 2000);
+
+    // Audio sync and drift correction
+    var start_delays = [0.0];
+    async function sync_audio() {
+      if (!filename) {
+        return;
+      }
+      let correct_time = performance.now() / 1000 - audio_start;
+      let drift = audio.currentTime - correct_time;
+      console.log("drift: " + drift);
+      if (Math.abs(drift) > 0.1) {
+        console.log("Major Drift: " + drift);
+        await set_audio_time(correct_time);
+      }
+    }
+    // Sets the audio's time, then waits for the audio to actually update and measures the delay so it can correct for it
+    async function set_audio_time(correct_time) {
+      let audio = document.getElementById('audio');
+      audio.currentTime = correct_time + start_delays.reduce((a, b) => a + b) / start_delays.length;
+      let start = performance.now() / 1000;
+      await new Promise((resolve, reject) => {
+        audio.onseeked = resolve;
+        audio.onerror = reject;
+      });
+      let end = performance.now() / 1000;
+      let delay = end - start;
+      start_delays.push(delay);
+      if (start_delays.length > 10) {
+        start_delays.shift();
+      }
+      log("start delay: " + delay);
+    }
+    setInterval(sync_audio, 100);
+
+    // Event log
+    function log(message) {
+      document.getElementById('log').innerHTML = message + "<br>" + document.getElementById('log').innerHTML;
+      console.log(message);
     }
   </script>
 </head>
 
 <body>
   <h1>Welcome to Test</h1>
-  <p>Currently Playing: "<span id="current_song"></span>"</p>
+  <p>Currently Playing: "<span id="current-song"></span>"</p>
   <audio id="audio" controls>
-    <source id="audioSource" src="" />
+    <source id="audio-source" src="" />
   </audio>
   <h2>Event Log</h2>
   <p id="log"></p>

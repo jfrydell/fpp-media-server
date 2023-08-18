@@ -5,11 +5,8 @@ use std::{
 };
 
 use axum::{
-    extract::{
-        ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
-    },
-    response::{IntoResponse, Response},
+    extract::State,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -24,7 +21,6 @@ async fn main() {
     let router = Router::new()
         .route("/", post(handle_sync_event))
         .route("/api/status", get(get_status))
-        .route("/ws", get(upgrade_ws))
         .with_state(state)
         .fallback_service(ServeDir::new("./content"));
     axum::Server::bind(&"0.0.0.0:9000".parse().unwrap())
@@ -40,6 +36,7 @@ async fn get_status(State(state): State<AppState>) -> Result<impl IntoResponse, 
         id: i32,
         filename: Option<String>,
         start_time: f64,
+        current_time: f64,
     }
     let avg_start = state
         .start_times
@@ -52,6 +49,7 @@ async fn get_status(State(state): State<AppState>) -> Result<impl IntoResponse, 
         id: state.id,
         filename: state.filename.clone(),
         start_time: avg_start,
+        current_time: current_time(),
     }))
 }
 
@@ -64,6 +62,7 @@ async fn handle_sync_event(State(app_state): State<AppState>, Json(event): Json<
                 state.id = id;
                 state.filename = Some(filename);
                 state.start_times.clear();
+                state.start_times.push_back(current_time());
             }
         }
         Event::MediaStop { id } => {
@@ -93,21 +92,6 @@ async fn handle_sync_event(State(app_state): State<AppState>, Json(event): Json<
                 state.start_times.clear();
             }
         }
-    }
-}
-
-async fn upgrade_ws(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(|ws| handle_ws(ws))
-}
-async fn handle_ws(mut ws: WebSocket) {
-    while let Some(Ok(msg)) = ws.recv().await {
-        if matches!(msg, Message::Close(_)) {
-            break;
-        }
-        // Send current time
-        ws.send(Message::Text(current_time().to_string()))
-            .await
-            .unwrap();
     }
 }
 

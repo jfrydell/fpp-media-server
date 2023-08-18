@@ -5,94 +5,75 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Listen</title>
   <script>
-    // Clock sync
-    var server_offset = 0; // (server time - client time) in seconds
-    async function sync_clock() {
-      let ws = new WebSocket(`ws://${window.location.host}/ws`);
-      await new Promise((resolve, reject) => {
-        ws.onopen = resolve;
-        ws.onerror = reject;
-      });
-      let server_offsets = [];
-      for (let i = 0; i < 10; i++) {
-        server_offsets.push(await benchmark_latency(ws));
-      }
-      server_offset = server_offsets.reduce((a, b) => a + b) / server_offsets.length;
-    }
-    async function benchmark_latency(ws) {
-      return await new Promise((resolve, reject) => {
-        let start = audio_ctx.currentTime;
-        ws.send(0);
-        ws.onmessage = (event) => {
-          let end = audio_ctx.currentTime;
-          let middle = parseFloat(event.data);
-          let offset = (middle - (start + end) / 2);
-          console.log("client times: " + start + ", " + end);
-          console.log("server time: " + middle);
-          console.log("latency: " + (end - start));
-          console.log("offset: " + offset);
-          resolve(offset);
-        };
-      });
-    }
-
-    // Audio context
+    // Global vars
     var audio_ctx = null;
     var audio_source = null;
-    var audio_start = 0; // client time when audio started playing
-    var filename = null; // filename of the current song
-    var id = -1; // id of the current status
-    async function update_audio_status() {
-      if (!server_offset) {
-        await sync_clock();
-      }
-      let status = await fetch("/api/status")
-        .then(response => response.json())
-      if (status.id == id) {
+    var audio_files = {}; // Map of filename to audio buffer
+    var current_id = -1; // ID of the current status
+
+    // Update audio, getting current status and updating source if necessary (always updates source if force_update is true)
+    async function update_audio(force_update = false) {
+      let status = await fetch_status();
+      if (status.id == current_id && !force_update) {
         return;
       }
-      if (!status.filename) {
-        filename = null;
-        document.getElementById('current-song').innerHTML = "N/A";
-        audio_start = audio_ctx.currentTime;
-        if (audio_source) {
-          audio_source.stop();
-        }
-        log("stopped audio");
-      } else {
-        filename = status.filename;
-        document.getElementById('current-song').innerHTML = filename;
-        audio_start = status.start_time - server_offset;
-        await load_audio(filename);
-        log("loaded " + filename);
-      }
-      id = status.id;
-    }
-    async function load_audio(filename) {
+      log(`Updating audio: ${JSON.stringify(status)}`);
+      // Stop the current source
       if (audio_source) {
         audio_source.stop();
+        audio_source = null;
       }
-      const response = await fetch(filename);
-      let buffer = await response.arrayBuffer();
-      await audio_ctx.decodeAudioData(buffer, (audio_buffer) => {
-        audio_source = audio_ctx.createBufferSource();
-        audio_source.buffer = audio_buffer;
-        audio_source.connect(audio_ctx.destination);
-
-        // Start audio at the correct time
-        let initial_time = audio_ctx.currentTime + 0.5 - audio_start;
-        audio_source.start(audio_ctx.currentTime + 0.5, initial_time);
-      });
+      // Update status
+      current_id = status.id;
+      document.getElementById('current-song').innerHTML = status.filename;
+      // If the filename is new, load the new audio
+      if (status.filename && !audio_files[status.filename]) {
+        await load_audio(status.filename);
+      }
+      // If we should be playing, start the audio
+      if (status.filename) {
+        await start_audio(status.filename, status.start_time);
+      }
     }
 
-    async function start_everything() {
-      log("starting...");
-      audio_ctx = new AudioContext();
-      await sync_clock();
-      await update_audio_status();
-      setInterval(sync_clock, 10000);
-      setInterval(update_audio_status, 2000);
-      log("started");
+    // Fetch the current status from the server, adjusting the start_time to be in audio_ctx time (adjusted for latency)
+    async function fetch_status() {
+      // Fetch page, checking time at beginning and end
+      let start_client_time = audio_ctx.currentTime;
+      let status = await fetch("/api/status")
+        .then(response => response.json());
+      let end_client_time = audio_ctx.currentTime;
+      // Get authoritative client and server time to find offset
+      let client_time = (start_client_time + end_client_time) / 2;
+      let server_time = status.current_time;
+      let offset = server_time - client_time;
+      // Adjust start_time
+      status.start_time -= offset;
+      console.log(`Got status: ${JSON.stringify(status)} at time ${start_client_time}, ${end_client_time}`);
+      return status;
+    }
+
+    // Load the audio file into a buffer in `audio_files`.
+    async function load_audio(filename) {
+      log("Loading audio: " + filename);
+      const response = await fetch(filename);
+      let buffer = await response.arrayBuffer();
+      let data = await audio_ctx.decodeAudioData(buffer);
+      audio_files[filename] = data;
+    }
+    
+    // Start audio source at correct time
+    async function start_audio(filename, start_time) {
+      log("Starting playback: " + filename);
+      // Create source node from buffer
+      audio_source = audio_ctx.createBufferSource();
+      audio_source.buffer = audio_files[filename];
+      audio_source.connect(audio_ctx.destination);
+      // Start audio in 0.5 seconds
+      let playback_offset = audio_ctx.currentTime - start_time + 0.5;
+      audio_source.start(audio_ctx.currentTime + 0.5, playback_offset);
+      // Wait for start
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     
     // Event log
@@ -102,7 +83,10 @@
     }
 
     document.addEventListener("DOMContentLoaded", () => {
-      document.getElementById("start-btn").onclick = start_everything;
+      document.getElementById("start-btn").onclick = () => {
+        audio_ctx = new AudioContext();
+        setInterval(update_audio, 2000);
+      };
     });
   </script>
 </head>

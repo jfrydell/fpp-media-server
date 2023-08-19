@@ -6,7 +6,7 @@ use std::{
 
 use axum::{
     extract::State,
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
@@ -19,14 +19,18 @@ type AppState = Arc<RwLock<CurrentState>>;
 async fn main() {
     let state = Arc::new(RwLock::new(CurrentState::default()));
     let router = Router::new()
-        .route("/", post(handle_sync_event))
+        .route("/", post(handle_sync_event).get(index))
         .route("/api/status", get(get_status))
         .with_state(state)
-        .fallback_service(ServeDir::new("./content"));
+        .nest_service("/audio", ServeDir::new("./audio"));
     axum::Server::bind(&"0.0.0.0:9000".parse().unwrap())
         .serve(router.into_make_service())
         .await
         .unwrap();
+}
+
+async fn index() -> impl IntoResponse {
+    Html(tokio::fs::read_to_string("./index.html").await.unwrap())
 }
 
 async fn get_status(State(state): State<AppState>) -> Result<impl IntoResponse, ()> {

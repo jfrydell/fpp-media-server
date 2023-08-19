@@ -12,7 +12,10 @@
     var current_id = -1; // ID of the current status
 
     // Update audio, getting current status and updating source if necessary (always updates source if force_update is true)
-    async function update_audio(force_update = false) {
+    async function update_audio(force_update = false, repeat_on_change = true) {
+      if (!audio_ctx) {
+        return;
+      }
       let status = await fetch_status();
       if (status.id == current_id && !force_update) {
         return;
@@ -34,10 +37,41 @@
       if (status.filename) {
         await start_audio(status.filename, status.start_time);
       }
+      // If we should repeat on change, update again in 0.5 seconds (to fix problem with first resync on new song being bad)
+      if (repeat_on_change) {
+        setTimeout(() => update_audio(true, false), 500);
+      }
     }
 
     // Fetch the current status from the server, adjusting the start_time to be in audio_ctx time (adjusted for latency)
     async function fetch_status() {
+      // Fetch status until the last 5 have the same id
+      let last_id = -1;
+      let status = [];
+      while (status.length < 5) {
+        let this_status = await fetch_status_once();
+        if (this_status.id != last_id) {
+          if (last_id != -1) {
+            log("Status ID changed mid-request, restarting get_status...");
+          }
+          status = [];
+          last_id = this_status.id;
+        }
+        status.push(this_status);
+      }
+      // Get average start_time
+      let all_start_time = status.map(s => s.start_time);
+      console.log(all_start_time);
+      let total_start_time = all_start_time.reduce((a, b) => a + b, 0);
+      let total_3_start_time = total_start_time - Math.min(...all_start_time) - Math.max(...all_start_time);
+      let avg_start_time = total_3_start_time / 3;
+      // Return status with adjusted start_time
+      status = status[0];
+      status.start_time = avg_start_time;
+      return status;
+    }
+    // Does one fetch of the content, adjusting start time accordingly. This is done 5 times and the average 3-of-5 is used for accurate start_time.
+    async function fetch_status_once() {
       // Fetch page, checking time at beginning and end
       let start_client_time = audio_ctx.currentTime;
       let status = await fetch("/api/status")
@@ -56,7 +90,7 @@
     // Load the audio file into a buffer in `audio_files`.
     async function load_audio(filename) {
       log("Loading audio: " + filename);
-      const response = await fetch(filename);
+      const response = await fetch("/audio/" + filename);
       let buffer = await response.arrayBuffer();
       let data = await audio_ctx.decodeAudioData(buffer);
       audio_files[filename] = data;
@@ -85,16 +119,26 @@
     document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("start-btn").onclick = () => {
         audio_ctx = new AudioContext();
-        setInterval(update_audio, 2000);
+        update_audio();
+        setInterval(update_audio, 1000);
+        // Update UI
+        document.getElementById("start-btn").disabled = true;
+        document.getElementById("start-btn").innerHTML = "Started";
+        document.getElementById("resync-btn").disabled = false;
+      };
+      document.getElementById("resync-btn").onclick = () => {
+        update_audio(true, false);
       };
     });
   </script>
 </head>
 
 <body>
-  <h1>Welcome to Test</h1>
-  <p>Currently Playing: "<span id="current-song"></span>"</p>
+  <h1>Welcome to Audio Sync Test</h1>
   <button id="start-btn">Start</button>
+  <button id="resync-btn" disabled>Resync</button>
+  <h2>Currently Playing</h2>
+  <p id="current-song"></p>
   <h2>Event Log</h2>
   <p id="log"></p>
 </body>
